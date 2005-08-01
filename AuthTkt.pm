@@ -1,0 +1,335 @@
+#
+# Module to generate authentication tickets for mod_auth_tkt apache module.
+#
+
+package Apache::AuthTkt;
+
+use 5.005;
+use Carp;
+use Digest::MD5 qw(md5_hex);
+use MIME::Base64;
+use strict;
+use vars qw($VERSION);
+
+$VERSION = '0.02';
+
+my $me = 'Apache::AuthTkt';
+
+# Process constructor args
+sub init
+{
+    my $self = shift;
+    my %arg = @_;
+
+    my $SECRET_LABEL = 'TKTAuthSecret';
+
+    if ($arg{secret}) {
+        $self->{secret} = $arg{secret};
+    }
+    elsif ($arg{conf}) {
+        unless (open CF, "<" . $arg{conf}) {
+            croak "[$me] open of config file '$arg{conf}' failed: $!";
+        }
+        $/ = "\n";
+        while (<CF>) {
+            if (/^\s*$SECRET_LABEL\s+\"(.*)\"/) {
+                $self->{secret} = $1;
+                last;
+            }
+        }
+        close CF;
+        unless ($self->{secret}) {
+            croak "[$me] $SECRET_LABEL not found in config file '$arg{conf}'";
+        }
+    }
+    else {
+        croak "[$me] bad constructor - 'secret' or 'conf' argument required";
+    }
+
+    $self;
+}
+
+# Constructor
+sub new
+{
+    my $class = shift;
+    my $self = {};
+    bless $self, $class;
+    $self->init(@_);
+}
+
+
+# Accessors/mutators
+sub secret { 
+    my $self = shift;
+    @_ and $self->{secret} = $_[0];
+    $self->{secret};
+}
+sub errstr { 
+    my $self = shift;
+    @_ and $self->{errstr} = $_[0];
+    $self->{errstr};
+}
+
+
+# Return a mod_auth_tkt ticket containing the given user details
+sub ticket
+{
+    my $self = shift;
+    my %DEFAULTS = (
+        uid => 'guest',
+        ip_addr => $ENV{REMOTE_ADDR},
+        base64 => 1,
+        data => '',
+        tokens => '',
+    );
+    my %arg = ( %DEFAULTS, @_ );
+
+    # Data cleanups
+    if ($arg{tokens}) {
+        $arg{tokens} =~ s/\s+,/,/g;
+        $arg{tokens} =~ s/,\s+/,/g;
+    }
+    # 0 or undef ip_addr treated as 0.0.0.0
+    $arg{ip_addr} = '0.0.0.0' if exists $arg{ip_addr} && ! $arg{ip_addr};
+
+    # Data checks
+    if ($arg{ip_addr} !~ m/^([12]?[0-9]?[0-9]\.){3}[12]?[0-9]?[0-9]$/) {
+        $self->errstr("invalid ip_addr '$arg{ip_addr}'");
+        return undef;
+    }
+    if ($arg{tokens} =~ m/[!@#\$%^&*];\s]/) {
+        $self->errstr("invalid chars in tokens '$arg{tokens}'");
+        return undef;
+    }
+
+    # Calculate the hash for the ticket
+    my $ts = $arg{ts} || time;
+    my @ip = split /\./, $arg{ip_addr};
+    my @ts = ( (($ts & 0xff000000) >> 24),
+               (($ts & 0xff0000) >> 16),
+               (($ts & 0xff00) >> 8),
+               (($ts & 0xff)) );
+    my $ipts = pack("C8", @ip, @ts);
+    my $digest0 = md5_hex($ipts . $self->secret . $arg{uid} . "\0" . $arg{tokens} . "\0" . $arg{data});
+    my $digest = md5_hex($digest0 . $self->secret);
+
+    if ($self->{debug} || $arg{debug}) {
+        print STDERR "ts: $ts\nip_addr: $arg{ip_addr}\nuid: $arg{uid}\ntokens: $arg{tokens}\ndata: $arg{data}\n";
+        print STDERR "secret: " . $self->secret . "\n";
+        print STDERR "digest0: $digest0\n";
+        print STDERR "digest: $digest\n";
+    }
+
+    # Construct the ticket itself
+    my $ticket = sprintf "%s%08x%s!", $digest, $ts, $arg{uid};
+    $ticket .= $arg{tokens} . '!' if $arg{tokens};
+    $ticket .= $arg{data};
+    
+    return $arg{base64} ? encode_base64($ticket, '') : $ticket;
+}
+
+
+# Return a cookie containing a mod_auth_tkt ticket 
+sub cookie
+{
+    my $self = shift;
+    my %DEFAULTS = (
+        cookie_name => 'auth_tkt',
+        cookie_domain => '',
+        cookie_path => '/',
+        cookie_secure => 0,
+    );
+    my %arg = ( %DEFAULTS, @_ );
+
+    # Get ticket, forcing base64 for cookies
+    my $ticket = $self->ticket(@_, base64 => 1) or return;
+
+    my $cookie_fmt = "%s=%s%s%s%s";
+    my $path_elt = "; path=$arg{cookie_path}";
+    my $domain_elt = $arg{cookie_domain} ? "; domain=$arg{cookie_domain}" : '';
+    my $secure_elt = $arg{cookie_secure} ? "; secure" : '';
+    return sprintf $cookie_fmt, 
+           $arg{cookie_name}, $ticket, $domain_elt, $path_elt, $secure_elt;
+}
+
+
+1;
+
+__END__
+
+=head1 NAME
+
+Apache::AuthTkt - module to generate authentication tickets for 
+mod_auth_tkt apache module.
+
+
+=head1 SYNOPSIS
+
+    # Constructor - either:
+    $at = Apache::AuthTkt->new(
+        secret => '818f9c9d-91ed-4b74-9f48-ff99cfe00a0e',
+    );
+    # or:
+    $at = Apache::AuthTkt->new(
+        conf => '/etc/httpd/conf.d/auth_tkt.conf',
+    );
+
+    # Generate ticket
+    $ticket = $at->ticket(uid => $username, ip_addr => $ip_addr);
+
+    # Or generate cookie containing ticket
+    $cookie = $at->cookie(
+        uid => $username, 
+        cookie_name => 'auth_tkt',
+        cookie_domain => 'www.openfusion.com.au',
+    );
+
+    # Access the shared secret
+    $secret = $at->secret();
+
+    # Report error string
+    print $at->errstr;
+
+
+=head1 INTRODUCTION
+
+Apache::AuthTkt is a module for generating authentication tickets
+for use with the 'mod_auth_tkt' apache module. Tickets are typically
+generated by a CGI/mod_perl page when a user has been authenticated.
+The ticket contains a username/uid for the authenticated user, and
+often also the IP address they authenticated from, a set of
+authorisation tokens, and any other user data required. The ticket
+also includes an MD5 hash of all the included user data plus a shared
+secret, so that tickets can be validated by mod_auth_tkt without
+requiring access to the user repository.
+
+See http://www.openfusion.com.au/labs/mod_auth_tkt for mod_auth_tkt
+itself.
+
+
+=head1 DESCRIPTION
+
+=head2 CONSTRUCTOR
+
+An Apache::AuthTkt object is created via a standard constructor
+with named arguments. It requires the mod_auth_tkt shared secret
+(the TKTAuthSecret value) to use with the MD5 hash. The following 
+alternatives are supported - supplying the secret explicitly:
+
+    $at = Apache::AuthTkt->new(
+        secret => '818f9c9d-91ed-4b74-9f48-ff99cfe00a0e',
+    );
+
+or pointing to the apache config file containing the mod_auth_tkt
+TKTAuthSecret directive, from which Apache::AuthTkt will parse
+the secret:
+
+    $at = Apache::Tkt->new(
+        conf => '/etc/httpd/conf/auth_tkt.conf',
+    );
+
+
+=head2 TICKET GENERATION
+
+Tickets are generated using the ticket() method with named parameters:
+
+    # Generate ticket
+    $ticket = $at->ticket(uid => $username);
+
+Ticket returns undef on error, with error information available via
+the errstr() method:
+ 
+    $ticket = $at->ticket or die $at->errstr;
+
+ticket() accepts the following arguments, all optional:
+
+=over 4
+
+=item uid
+
+uid, username, or other user identifier for this ticket. There is no
+requirement that this be unique per-user. Default: 'guest'.
+
+=item ip_addr
+
+IP address associated with this ticket. Note that if you are using
+mod_auth_tkt 'TKTAuthIgnoreIP on', you must pass a false value for this 
+parameter (e.g. undef). Default: $ENV{REMOTE_ADDR}.
+
+=item tokens
+
+A comma-separated list of tokens associated with this user. Typically
+only used if you are using the mod_auth_tkt TKTAuthToken directive.
+Default: none.
+
+=item data
+
+Arbitrary user data to be stored for this ticket. This data is included
+in the MD5 hash check. Default: none.
+
+=item base64
+
+Flag used to indicate whether to base64-encode the ticket. Default: 1.
+
+=item ts
+
+Explicitly set the timestamp to use for this ticket. Only for testing!
+
+=back
+
+Alternatively, the cookie() method can be used to return the generated
+ticket in cookie format. cookie() returns undef on error, with error
+information available via the errstr() method:
+
+    $cookie = $at->cookie or die $at->errstr;
+
+cookie() supports all the same arguments as ticket(), plus the following:
+
+=over 4
+
+=item cookie_name
+
+Cookie name. Should match the TKTAuthCookieName directive, if you're
+using it. Default: 'auth_tkt'.
+
+=item cookie_domain
+
+Cookie domain. Should match the TKTAuthDomain directive, if you're
+using it. Default: none.
+
+=item cookie_path
+
+Cookie path. Default: '/'.
+
+=item cookie_secure
+
+Flag whether to set the 'secure' cookie flag, so that the cookie is 
+returned only in HTTPS contexts. Default: 0.
+
+=back
+
+
+=head1 BUGS
+
+We should be able to use the mod_auth_tkt Apache configuration directives 
+for our ticket settings instead of forcing the user to pass them again as 
+parameters.
+
+
+=head1 AUTHOR
+
+Gavin Carr <gavin@openfusion.com.au>
+
+
+=head1 COPYRIGHT
+
+Copyright 2001-2005 Open Fusion Pty Ltd. All Rights Reserved.
+
+This program is free software. You may copy or redistribute it under the 
+same terms as perl itself.
+
+=cut
+
+
+# arch-tag: 66306185-1c1a-4190-8edc-46f631719e78
