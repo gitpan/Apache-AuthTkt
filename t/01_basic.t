@@ -31,3 +31,4 @@ is($at->secret, '0e1d79e1-c18b-43c5-bfd6-a396e13bf39c', 'secret() ok');
 
 
 # arch-tag: 18848348-837a-4496-a483-10e9ba4714ba
+# vim:ft=perl

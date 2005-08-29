@@ -84,3 +84,4 @@ is($ticket, $result{complex2}, 'ticket complex 2 ok');
 
 
 # arch-tag: 1c96ac32-1e55-4ec3-9b22-28ff2787d478
+# vim:ft=perl

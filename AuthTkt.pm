@@ -9,11 +9,77 @@ use Carp;
 use Digest::MD5 qw(md5_hex);
 use MIME::Base64;
 use strict;
-use vars qw($VERSION);
+use vars qw($VERSION $AUTOLOAD);
 
-$VERSION = '0.02';
+$VERSION = '0.03';
 
 my $me = 'Apache::AuthTkt';
+my $PREFIX = 'TKTAuth';
+my %DEFAULTS = (
+    TKTAuthCookieName           => 'auth_tkt',
+    TKTAuthBackArgName          => 'back',
+    TKTAuthTimeoutMin           => 120,
+    TKTAuthTimeoutRefresh       => 0.5,
+    TKTAuthGuestLogin           => 0,
+    TKTAuthIgnoreIP             => 0,
+    TKTAuthRequireSSL           => 0,
+);
+my %BOOLEAN = map { $_ => 1 } qw(
+    TKTAuthGuestLogin TKTAuthIgnoreIP TKTAuthRequireSSL
+);
+# Default TKTAuthDomain to host part of HTTP_HOST, or SERVER_NAME
+($DEFAULTS{TKTAuthDomain}) = split /:/, $ENV{HTTP_HOST} || '';
+$DEFAULTS{TKTAuthDomain} ||= $ENV{SERVER_NAME};
+my %ATTR = map { $_ => 1 } qw(
+    secret 
+    cookie_name back_cookie_name back_arg_name domain
+    login_url timeout_url unauth_url 
+    timeout_min timeout_refresh token 
+    guest_login ignore_ip require_ssl
+);
+
+# Parse (simplistically) the given apache config file for TKTAuth directives
+sub parse_conf
+{
+    my $self = shift;
+    my ($conf) = @_;
+
+    my %seen = ();
+    open CF, "<$conf" or
+        die "[$me] open of config file '$conf' failed: $!";
+
+    # Take settings from first instance of each TKTAuth directive found
+    local $/ = "\n";
+    while (<CF>) {
+        if (m/^\s*(${PREFIX}\w+)\s+(.*)/) {
+            $seen{$1} = $2 unless exists $seen{$1};
+        }
+    }
+
+    close CF;
+    die "[$me] TKTAuthSecret directive not found in config file '$conf'"
+        unless $seen{TKTAuthSecret};
+
+    # Set directives as $self attributes
+    my %merge = ( %DEFAULTS, %seen );
+    for my $directive (keys %merge) {
+        local $_ = $directive;
+        s/^TKTAuth(\w)/\L$1/;
+        s/([a-z])([A-Z]+)/\L$1_$2/g;
+        $merge{$directive} =~ s/^"([^"]+)"$/$1/ if $merge{$directive};
+        if ($BOOLEAN{$directive}) {
+            $merge{$directive} = 0 
+                if $merge{$directive} =~ m/^(off|no|false)$/i;
+            $merge{$directive} = 1 
+                if $merge{$directive} =~ m/^(on|yes|true)$/i;
+        }
+        else {
+            $merge{$directive} =~ s/^\s+//;
+            $merge{$directive} =~ s/\s+$//;
+        }
+        $self->{$_} = $merge{$directive};
+    }
+}
 
 # Process constructor args
 sub init
@@ -21,26 +87,11 @@ sub init
     my $self = shift;
     my %arg = @_;
 
-    my $SECRET_LABEL = 'TKTAuthSecret';
-
     if ($arg{secret}) {
         $self->{secret} = $arg{secret};
     }
     elsif ($arg{conf}) {
-        unless (open CF, "<" . $arg{conf}) {
-            croak "[$me] open of config file '$arg{conf}' failed: $!";
-        }
-        $/ = "\n";
-        while (<CF>) {
-            if (/^\s*$SECRET_LABEL\s+\"(.*)\"/) {
-                $self->{secret} = $1;
-                last;
-            }
-        }
-        close CF;
-        unless ($self->{secret}) {
-            croak "[$me] $SECRET_LABEL not found in config file '$arg{conf}'";
-        }
+        $self->parse_conf($arg{conf});
     }
     else {
         croak "[$me] bad constructor - 'secret' or 'conf' argument required";
@@ -58,19 +109,24 @@ sub new
     $self->init(@_);
 }
 
-
-# Accessors/mutators
-sub secret { 
+# Setup autoload accessors
+sub AUTOLOAD {
     my $self = shift;
-    @_ and $self->{secret} = $_[0];
-    $self->{secret};
+    my $attr = $AUTOLOAD;
+    $attr =~ s/.*:://;
+    die qq(Can't locate object method "$attr" via package "$self")
+        unless $ATTR{$attr};
+    return $self->{$attr};
 }
-sub errstr { 
+
+sub DESTROY {}
+
+sub errstr
+{
     my $self = shift;
-    @_ and $self->{errstr} = $_[0];
+    $@[0] and $self->{errstr} = join ' ', @_;
     $self->{errstr};
 }
-
 
 # Return a mod_auth_tkt ticket containing the given user details
 sub ticket
@@ -78,20 +134,22 @@ sub ticket
     my $self = shift;
     my %DEFAULTS = (
         uid => 'guest',
-        ip_addr => $ENV{REMOTE_ADDR},
         base64 => 1,
         data => '',
         tokens => '',
     );
     my %arg = ( %DEFAULTS, @_ );
+    unless (exists $arg{ip_addr}) {
+        $arg{ip_addr} = $self->ignore_ip ? '0.0.0.0' : $ENV{REMOTE_ADDR};
+    }
+    # 0 or undef ip_addr treated as 0.0.0.0
+    $arg{ip_addr} ||= '0.0.0.0';
 
     # Data cleanups
     if ($arg{tokens}) {
         $arg{tokens} =~ s/\s+,/,/g;
         $arg{tokens} =~ s/,\s+/,/g;
     }
-    # 0 or undef ip_addr treated as 0.0.0.0
-    $arg{ip_addr} = '0.0.0.0' if exists $arg{ip_addr} && ! $arg{ip_addr};
 
     # Data checks
     if ($arg{ip_addr} !~ m/^([12]?[0-9]?[0-9]\.){3}[12]?[0-9]?[0-9]$/) {
@@ -111,13 +169,16 @@ sub ticket
                (($ts & 0xff00) >> 8),
                (($ts & 0xff)) );
     my $ipts = pack("C8", @ip, @ts);
-    my $digest0 = md5_hex($ipts . $self->secret . $arg{uid} . "\0" . $arg{tokens} . "\0" . $arg{data});
+    my $raw = $ipts . $self->secret . $arg{uid} . "\0" . $arg{tokens} . "\0" . $arg{data};
+    my $digest0 = md5_hex($raw);
     my $digest = md5_hex($digest0 . $self->secret);
 
     if ($self->{debug} || $arg{debug}) {
         print STDERR "ts: $ts\nip_addr: $arg{ip_addr}\nuid: $arg{uid}\ntokens: $arg{tokens}\ndata: $arg{data}\n";
         print STDERR "secret: " . $self->secret . "\n";
-        print STDERR "digest0: $digest0\n";
+        print STDERR "raw: '$raw'\n";
+        my $len = length($raw);
+        print STDERR "digest0: $digest0 (input length $len)\n";
         print STDERR "digest: $digest\n";
     }
 
@@ -129,18 +190,18 @@ sub ticket
     return $arg{base64} ? encode_base64($ticket, '') : $ticket;
 }
 
-
 # Return a cookie containing a mod_auth_tkt ticket 
 sub cookie
 {
     my $self = shift;
     my %DEFAULTS = (
-        cookie_name => 'auth_tkt',
         cookie_domain => '',
         cookie_path => '/',
-        cookie_secure => 0,
     );
     my %arg = ( %DEFAULTS, @_ );
+    $arg{cookie_name} ||= $self->cookie_name || 'auth_tkt';
+    $arg{cookie_domain} ||= $self->domain;
+    $arg{cookie_secure} ||= $self->require_ssl;
 
     # Get ticket, forcing base64 for cookies
     my $ticket = $self->ticket(@_, base64 => 1) or return;
@@ -166,13 +227,13 @@ mod_auth_tkt apache module.
 
 =head1 SYNOPSIS
 
-    # Constructor - either:
-    $at = Apache::AuthTkt->new(
-        secret => '818f9c9d-91ed-4b74-9f48-ff99cfe00a0e',
-    );
-    # or:
+    # Constructor - either (preferred):
     $at = Apache::AuthTkt->new(
         conf => '/etc/httpd/conf.d/auth_tkt.conf',
+    );
+    # OR:
+    $at = Apache::AuthTkt->new(
+        secret => '818f9c9d-91ed-4b74-9f48-ff99cfe00a0e',
     );
 
     # Generate ticket
@@ -187,6 +248,9 @@ mod_auth_tkt apache module.
 
     # Access the shared secret
     $secret = $at->secret();
+    # If using the 'conf' constructor above, all other TKTAuth attributes 
+    #   are also available e.g.:
+    print $at->cookie_name(), $at->ignore_ip(), $at->request_ssl();
 
     # Report error string
     print $at->errstr;
@@ -213,21 +277,45 @@ itself.
 =head2 CONSTRUCTOR
 
 An Apache::AuthTkt object is created via a standard constructor
-with named arguments. It requires the mod_auth_tkt shared secret
-(the TKTAuthSecret value) to use with the MD5 hash. The following 
-alternatives are supported - supplying the secret explicitly:
+with named arguments. The preferred form is to point the constructor
+to the apache config file containing the mod_auth_tkt TKTAuthSecret
+directive, from which Apache::AuthTkt will parse the shared secret
+it needs, as well as any additional TKTAuth* directives it finds:
+
+    $at = Apache::Tkt->new(
+        conf => '/etc/httpd/conf/auth_tkt.conf',
+    );
+
+Alternatively, you can pass the mod_auth_tkt shared secret (the 
+TKTAuthSecret value) explicitly to the constructor: 
 
     $at = Apache::AuthTkt->new(
         secret => '818f9c9d-91ed-4b74-9f48-ff99cfe00a0e',
     );
 
-or pointing to the apache config file containing the mod_auth_tkt
-TKTAuthSecret directive, from which Apache::AuthTkt will parse
-the secret:
 
-    $at = Apache::Tkt->new(
-        conf => '/etc/httpd/conf/auth_tkt.conf',
-    );
+=head2 ACCESSORS
+
+If the 'conf' form of the constructor is used, Apache::AuthTkt parses
+all additional TKTAuth* directives it finds there and stores them in
+additional internal attributes. Those values are available via 
+accessors named after the relevant TKTAuth directive (with the 'TKTAuth'
+prefix dropped and converted to underscore format) i.e.
+
+    $at->secret()
+    $at->cookie_name()
+    $at->back_cookie_name()
+    $at->back_arg_name()
+    $at->domain()
+    $at->login_url()
+    $at->timeout_url()
+    $at->unauth_url()
+    $at->timeout_min()
+    $at->timeout_refresh()
+    $at->token ()
+    $at->guest_login()
+    $at->ignore_ip()
+    $at->require_ssl()
 
 
 =head2 TICKET GENERATION
@@ -253,9 +341,8 @@ requirement that this be unique per-user. Default: 'guest'.
 
 =item ip_addr
 
-IP address associated with this ticket. Note that if you are using
-mod_auth_tkt 'TKTAuthIgnoreIP on', you must pass a false value for this 
-parameter (e.g. undef). Default: $ENV{REMOTE_ADDR}.
+IP address associated with this ticket. Default: if $at->ignore_ip
+is true, then '0.0.0.0', otherwise $ENV{REMOTE_ADDR};
 
 =item tokens
 
@@ -278,25 +365,27 @@ Explicitly set the timestamp to use for this ticket. Only for testing!
 
 =back
 
-Alternatively, the cookie() method can be used to return the generated
-ticket in cookie format. cookie() returns undef on error, with error
-information available via the errstr() method:
+
+As an alternative to ticket(), the cookie() method can be used to 
+return the generated ticket in cookie format. cookie() returns undef 
+on error, with error information available via the errstr() method:
 
     $cookie = $at->cookie or die $at->errstr;
 
-cookie() supports all the same arguments as ticket(), plus the following:
+cookie() supports all the same arguments as ticket(), plus the 
+following:
 
 =over 4
 
 =item cookie_name
 
 Cookie name. Should match the TKTAuthCookieName directive, if you're
-using it. Default: 'auth_tkt'.
+using it. Default: $at->cookie_name, or 'auth_tkt'.
 
 =item cookie_domain
 
 Cookie domain. Should match the TKTAuthDomain directive, if you're
-using it. Default: none.
+using it. Default: $at->domain.
 
 =item cookie_path
 
@@ -305,16 +394,9 @@ Cookie path. Default: '/'.
 =item cookie_secure
 
 Flag whether to set the 'secure' cookie flag, so that the cookie is 
-returned only in HTTPS contexts. Default: 0.
+returned only in HTTPS contexts. Default: $at->require_ssl, or 0.
 
 =back
-
-
-=head1 BUGS
-
-We should be able to use the mod_auth_tkt Apache configuration directives 
-for our ticket settings instead of forcing the user to pass them again as 
-parameters.
 
 
 =head1 AUTHOR
@@ -333,3 +415,4 @@ same terms as perl itself.
 
 
 # arch-tag: 66306185-1c1a-4190-8edc-46f631719e78
+# vim:sw=4

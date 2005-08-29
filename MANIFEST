@@ -5,6 +5,8 @@ AuthTkt.pm
 t/01_basic.t
 t/02_ticket.t
 t/03_cookie.t
+t/04_parse_conf.t
+t/05_defaults.t
 t/t01/mod_auth_tkt.conf
 t/t02/complex1
 t/t02/complex2
@@ -19,3 +21,7 @@ t/t03/cookie_secure
 t/t03/defaults
 t/t03/multiple
 t/t03/ticket
+t/t04/mod_auth_tkt.conf
+t/t05/01_auth_tkt.conf
+t/t05/02_auth_tkt.conf
+t/t05/03_auth_tkt.conf
