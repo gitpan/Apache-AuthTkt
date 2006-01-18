@@ -11,14 +11,15 @@ use MIME::Base64;
 use strict;
 use vars qw($VERSION $AUTOLOAD);
 
-$VERSION = '0.03';
+$VERSION = '0.05';
 
 my $me = 'Apache::AuthTkt';
 my $PREFIX = 'TKTAuth';
 my %DEFAULTS = (
     TKTAuthCookieName           => 'auth_tkt',
     TKTAuthBackArgName          => 'back',
-    TKTAuthTimeoutMin           => 120,
+    TKTAuthTimeout              => 2 * 60 * 60,
+    TKTAuthTimeoutMin           => 2 * 60,
     TKTAuthTimeoutRefresh       => 0.5,
     TKTAuthGuestLogin           => 0,
     TKTAuthIgnoreIP             => 0,
@@ -32,11 +33,36 @@ my %BOOLEAN = map { $_ => 1 } qw(
 $DEFAULTS{TKTAuthDomain} ||= $ENV{SERVER_NAME};
 my %ATTR = map { $_ => 1 } qw(
     secret 
-    cookie_name back_cookie_name back_arg_name domain
+    cookie_name back_cookie_name back_arg_name domain cookie_expires
     login_url timeout_url unauth_url 
-    timeout_min timeout_refresh token 
+    timeout timeout_min timeout_refresh token 
     guest_login ignore_ip require_ssl
 );
+
+# Helper routine to convert time units into seconds
+my %units = (
+  s => 1,
+  m => 60,
+  h => 3600,
+  d => 86400,
+  w => 7 * 86400,
+  M => 30 * 86400,
+  y => 365 * 86400,
+);
+sub convert_time_seconds
+{
+    my $self = shift;
+    local $_ = shift;
+    return $1 if m/^\s*(\d+)\s*$/;
+    my $sec = 0;
+    while (m/\G(\d+)([shdwmMy])\b\s*/gc) {
+        my $amt = $1;
+        my $unit = $2 || 's';
+        $sec += $amt * $units{$unit};
+#       print STDERR "$amt : $unit : $sec\n";
+    }
+    return $sec;
+}
 
 # Parse (simplistically) the given apache config file for TKTAuth directives
 sub parse_conf
@@ -73,11 +99,16 @@ sub parse_conf
             $merge{$directive} = 1 
                 if $merge{$directive} =~ m/^(on|yes|true)$/i;
         }
-        else {
+        elsif (defined $merge{$directive}) {
             $merge{$directive} =~ s/^\s+//;
             $merge{$directive} =~ s/\s+$//;
         }
-        $self->{$_} = $merge{$directive};
+        if ($directive eq 'TKTAuthCookieExpires' || $directive eq 'TKTAuthTimeout') {
+          $self->{$_} = $self->convert_time_seconds($merge{$directive});
+        }
+        else {
+          $self->{$_} = $merge{$directive};
+        }
     }
 }
 
@@ -300,17 +331,18 @@ If the 'conf' form of the constructor is used, Apache::AuthTkt parses
 all additional TKTAuth* directives it finds there and stores them in
 additional internal attributes. Those values are available via 
 accessors named after the relevant TKTAuth directive (with the 'TKTAuth'
-prefix dropped and converted to underscore format) i.e.
+prefix dropped and converted to lowercase underscore format) i.e.
 
     $at->secret()
     $at->cookie_name()
     $at->back_cookie_name()
     $at->back_arg_name()
     $at->domain()
+    $at->cookie_expires()
     $at->login_url()
     $at->timeout_url()
     $at->unauth_url()
-    $at->timeout_min()
+    $at->timeout()
     $at->timeout_refresh()
     $at->token ()
     $at->guest_login()
