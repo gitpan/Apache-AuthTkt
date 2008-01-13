@@ -11,7 +11,7 @@ use MIME::Base64;
 use strict;
 use vars qw($VERSION $AUTOLOAD);
 
-$VERSION = '0.05';
+$VERSION = '0.07';
 
 my $me = 'Apache::AuthTkt';
 my $PREFIX = 'TKTAuth';
@@ -22,22 +22,25 @@ my %DEFAULTS = (
     TKTAuthTimeoutMin           => 2 * 60,
     TKTAuthTimeoutRefresh       => 0.5,
     TKTAuthGuestLogin           => 0,
+    TKTAuthGuestUser            => 'guest',
     TKTAuthIgnoreIP             => 0,
     TKTAuthRequireSSL           => 0,
+    TKTAuthCookieSecure         => 0,
 );
 my %BOOLEAN = map { $_ => 1 } qw(
-    TKTAuthGuestLogin TKTAuthIgnoreIP TKTAuthRequireSSL
+    TKTAuthGuestLogin TKTAuthIgnoreIP TKTAuthRequireSSL TKTAuthCookieSecure
 );
 # Default TKTAuthDomain to host part of HTTP_HOST, or SERVER_NAME
 ($DEFAULTS{TKTAuthDomain}) = split /:/, $ENV{HTTP_HOST} || '';
 $DEFAULTS{TKTAuthDomain} ||= $ENV{SERVER_NAME};
 my %ATTR = map { $_ => 1 } qw(
-    secret 
+    conf secret 
     cookie_name back_cookie_name back_arg_name domain cookie_expires
-    login_url timeout_url unauth_url 
-    timeout timeout_min timeout_refresh token 
-    guest_login ignore_ip require_ssl
+    login_url timeout_url post_timeout_url unauth_url 
+    timeout timeout_min timeout_refresh token debug
+    guest_login guest_user ignore_ip require_ssl cookie_secure
 );
+#my %TICKET_ARGS = map { $_ => 1 } 
 
 # Helper routine to convert time units into seconds
 my %units = (
@@ -106,7 +109,8 @@ sub parse_conf
         if ($directive eq 'TKTAuthCookieExpires' || $directive eq 'TKTAuthTimeout') {
           $self->{$_} = $self->convert_time_seconds($merge{$directive});
         }
-        else {
+        # Don't allow TKTAuthDebug to turn on debugging here
+        elsif ($directive ne 'TKTAuthDebug') {
           $self->{$_} = $merge{$directive};
         }
     }
@@ -118,15 +122,21 @@ sub init
     my $self = shift;
     my %arg = @_;
 
-    if ($arg{secret}) {
-        $self->{secret} = $arg{secret};
+    # Check for invalid args
+    for (keys %arg) {
+        croak "[$me] invalid argument to constructor: $_" unless exists $ATTR{$_};
     }
-    elsif ($arg{conf}) {
+
+    # Parse config file if set
+    if ($arg{conf}) {
         $self->parse_conf($arg{conf});
     }
-    else {
-        croak "[$me] bad constructor - 'secret' or 'conf' argument required";
-    }
+
+    # Store/override from given args
+    $self->{$_} = $arg{$_} foreach keys %arg;
+
+    croak "[$me] bad constructor - 'secret' or 'conf' argument required"
+        unless $self->{conf} || $self->{secret};
 
     $self;
 }
@@ -140,13 +150,14 @@ sub new
     $self->init(@_);
 }
 
-# Setup autoload accessors
+# Setup autoload accessors/mutators
 sub AUTOLOAD {
     my $self = shift;
     my $attr = $AUTOLOAD;
     $attr =~ s/.*:://;
     die qq(Can't locate object method "$attr" via package "$self")
         unless $ATTR{$attr};
+    @_ and $self->{$attr} = $_[0];
     return $self->{$attr};
 }
 
@@ -164,15 +175,14 @@ sub ticket
 {
     my $self = shift;
     my %DEFAULTS = (
-        uid => 'guest',
         base64 => 1,
         data => '',
         tokens => '',
     );
-    my %arg = ( %DEFAULTS, @_ );
-    unless (exists $arg{ip_addr}) {
-        $arg{ip_addr} = $self->ignore_ip ? '0.0.0.0' : $ENV{REMOTE_ADDR};
-    }
+    my %arg = ( %DEFAULTS, %$self, @_ );
+    $arg{uid} = $self->guest_user unless exists $arg{uid};
+    $arg{ip_addr} = $arg{ignore_ip} ? '0.0.0.0' : $ENV{REMOTE_ADDR}
+        unless exists $arg{ip_addr};
     # 0 or undef ip_addr treated as 0.0.0.0
     $arg{ip_addr} ||= '0.0.0.0';
 
@@ -187,7 +197,7 @@ sub ticket
         $self->errstr("invalid ip_addr '$arg{ip_addr}'");
         return undef;
     }
-    if ($arg{tokens} =~ m/[!@#\$%^&*];\s]/) {
+    if ($arg{tokens} =~ m/[!@#\$%^&*\];\s]/) {
         $self->errstr("invalid chars in tokens '$arg{tokens}'");
         return undef;
     }
@@ -204,7 +214,7 @@ sub ticket
     my $digest0 = md5_hex($raw);
     my $digest = md5_hex($digest0 . $self->secret);
 
-    if ($self->{debug} || $arg{debug}) {
+    if ($arg{debug}) {
         print STDERR "ts: $ts\nip_addr: $arg{ip_addr}\nuid: $arg{uid}\ntokens: $arg{tokens}\ndata: $arg{data}\n";
         print STDERR "secret: " . $self->secret . "\n";
         print STDERR "raw: '$raw'\n";
@@ -226,13 +236,11 @@ sub cookie
 {
     my $self = shift;
     my %DEFAULTS = (
-        cookie_domain => '',
+        cookie_name => 'auth_tkt',
         cookie_path => '/',
     );
-    my %arg = ( %DEFAULTS, @_ );
-    $arg{cookie_name} ||= $self->cookie_name || 'auth_tkt';
+    my %arg = ( %DEFAULTS, %$self, @_ );
     $arg{cookie_domain} ||= $self->domain;
-    $arg{cookie_secure} ||= $self->require_ssl;
 
     # Get ticket, forcing base64 for cookies
     my $ticket = $self->ticket(@_, base64 => 1) or return;
@@ -243,6 +251,44 @@ sub cookie
     my $secure_elt = $arg{cookie_secure} ? "; secure" : '';
     return sprintf $cookie_fmt, 
            $arg{cookie_name}, $ticket, $domain_elt, $path_elt, $secure_elt;
+}
+
+# returns a hashref representing the original ticket components
+# returns undef if there were any errors
+sub parse_ticket
+{
+    my $self    = shift;
+    my $ticket  = shift or croak "No ticket passed to parse_ticket";
+    my $parts   = {};
+
+    # Strip possible quotes
+    $ticket =~ s,^"|"$,,g;
+
+    return if length($ticket) < 40;
+
+    # Assume $ticket is not URL-escaped but may be base64-escaped
+    my $raw = $ticket =~ m/!/ ? $ticket : decode_base64($ticket);
+
+    # If $raw still doesn't have ! then it is bogus
+    return if $raw !~ m/!/;
+    
+    # Deconstruct
+    my ($digest,$ts,$uid,$extra) = ($raw =~ m/^(.{32})(.{8})(.+?)!(.*)$/);
+    $parts->{ts}  = hex($ts);
+    $parts->{uid} = $uid;
+    $parts->{tokens} = '';
+    $parts->{data} = '';
+
+    # Tokens and data if present
+    if (defined $extra) {
+        if ($extra =~ m/!/) {
+            ($parts->{tokens},$parts->{data}) = split m/!/, $extra, 2;
+        }
+        else {
+            $parts->{data} = $extra;
+        }
+    }
+    return $parts;
 }
 
 
@@ -430,15 +476,42 @@ returned only in HTTPS contexts. Default: $at->require_ssl, or 0.
 
 =back
 
+=head2 TICKET VALIDATION
+
+You may validate a ticket with the parse_ticket() method. parse_ticket()
+takes one parameter (a ticket value) and returns a hashref with the following
+key/value pairs:
+
+=over 4
+
+=item ts
+
+=item uid
+
+=item tokens
+
+=item data
+
+=back
+
+parse_ticket() will return undef if any errors with the ticket value are 
+encountered.
+
+The parse_ticket() method algorithm is analogous to the function with the 
+same name in the mod_auth_tkt C module.
 
 =head1 AUTHOR
 
 Gavin Carr <gavin@openfusion.com.au>
 
+Contributors:
+
+Peter Karman <peter@peknet.com>
+
 
 =head1 COPYRIGHT
 
-Copyright 2001-2005 Open Fusion Pty Ltd. All Rights Reserved.
+Copyright 2001-2008 Open Fusion Pty Ltd.
 
 This program is free software. You may copy or redistribute it under the 
 same terms as perl itself.
@@ -446,5 +519,4 @@ same terms as perl itself.
 =cut
 
 
-# arch-tag: 66306185-1c1a-4190-8edc-46f631719e78
 # vim:sw=4

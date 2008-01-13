@@ -1,7 +1,7 @@
 # Basic constructor
 
 use File::Basename;
-use Test::More tests => 8;
+use Test::More tests => 25;
 BEGIN { use_ok( Apache::AuthTkt ) }
 use strict;
 
@@ -29,6 +29,27 @@ ok($at = Apache::AuthTkt->new(conf => "$dir/t01/mod_auth_tkt.conf"),
     'conf constructor ok');
 is($at->secret, '0e1d79e1-c18b-43c5-bfd6-a396e13bf39c', 'secret() ok');
 
+# Constructor with args
+my %arg = (
+    secret => $secret,
+    cookie_name => 'auth_cookie',
+    back_arg_name => 'bacchus',
+    domain => '.openfusion.com.au',
+    login_url => 'http://www.openfusion.com.au/auth/login.cgi',
+    timeout_url => 'http://www.openfusion.com.au/auth/login.cgi?timeout=1',
+    post_timeout_url => 'http://www.openfusion.com.au/auth/login.cgi?post_timeout=1',
+    unauth_url => 'http://www.openfusion.com.au/auth/login.cgi?unauth=1',
+    timeout => '2d',
+    timeout_refresh => 0.33,
+    guest_login => 0,
+    guest_user => 'visitor',
+    ignore_ip => 1,
+    require_ssl => 1,
+    cookie_secure => 1,
+    debug => 1,
+);
+ok($at = Apache::AuthTkt->new(%arg), 'non-conf constructor with args ok');
+is($at->$_, $arg{$_}, "$_ accessor value ok") for keys %arg;
 
-# arch-tag: 18848348-837a-4496-a483-10e9ba4714ba
+
 # vim:ft=perl

@@ -81,6 +81,5 @@ $cookie = $at2->cookie(ts => $ts);
 is($cookie, $cookie2, 'cookie defaults honoured from 02_auth_tkt.conf');
 
 
-# arch-tag: fd81ebdd-4ee4-4773-a7c3-5687d5b05d96
 # vim:ft=perl
 

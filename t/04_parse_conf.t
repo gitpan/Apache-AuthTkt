@@ -60,5 +60,4 @@ for (sort keys %attr) {
 ok(! defined eval { $at->foo }, "die on invalid method ok");
 
 
-# arch-tag: 1c62dd79-eb46-4f49-a623-192a5da8ba37
 # vim:ft=perl

@@ -1,8 +1,8 @@
-# Test ticket()
+# Test parse_ticket()
 
 use File::Basename;
-use Test::More tests => 8;
-BEGIN { use_ok( Apache::AuthTkt ) }
+use Test::More tests => 33;
+BEGIN { use_ok(Apache::AuthTkt) }
 use strict;
 
 # Testing against old TktUtil
@@ -58,33 +58,59 @@ ok($at = Apache::AuthTkt->new(conf => $conf),
     'conf constructor ok');
 is($at->secret, '0e1d79e1-c18b-43c5-bfd6-a396e13bf39c', 'secret() ok');
 
+my $parsed;
+
 # Default settings
 print TktUtil::get_auth_ticket(ts => $ts, base64 => 0, uid => 'guest', ip_addr => $ENV{REMOTE_ADDR}) . "\n" if $TU;
 $ticket = $at->ticket(ts => $ts, base64 => 0);
 report $ticket, 'defaults';
 is($ticket, $result{defaults}, 'ticket using defaults ok');
+ok($parsed = $at->parse_ticket($ticket), 'parse ticket using defaults');
+is($parsed->{uid}, 'guest', 'uid parsed');
+is($parsed->{ts}, $ts, 'ts parsed');
+is($parsed->{tokens}, '', "tokens ''");
+is($parsed->{data}, '', "data ''");
 
 # TKTAuthIgnoreIP tickets
 print TktUtil::get_auth_ticket(ts => $ts, uid => 'guest', ip_addr => '0.0.0.0') . "\n" if $TU;
 $ticket = $at->ticket(ts => $ts, ip_addr => 0);
 report $ticket, 'ignore_ip';
 is($ticket, $result{ignore_ip}, 'ticket ignore ip 1 ok');
+ok($parsed = $at->parse_ticket($ticket), 'parse ticket ignore ip 1');
+is($parsed->{uid}, 'guest', 'uid parsed');
+is($parsed->{ts}, $ts, 'ts parsed');
+is($parsed->{tokens}, '', "tokens ''");
+is($parsed->{data}, '', "data ''");
 
 $ticket = $at->ticket(ts => $ts, ip_addr => undef);
 report $ticket, 'ignore_ip';
 is($ticket, $result{ignore_ip}, 'ticket ignore ip 2 ok');
+ok($parsed = $at->parse_ticket($ticket), 'parse ticket ignore ip 2');
+is($parsed->{uid}, 'guest', 'uid parsed');
+is($parsed->{ts}, $ts, 'ts parsed');
+is($parsed->{tokens}, '', "tokens ''");
+is($parsed->{data}, '', "data ''");
 
 # Complex tickets
 print TktUtil::get_auth_ticket(ts => $ts, base64 => 0, uid => 'gavin', ip_addr => $ENV{REMOTE_ADDR}, tokens => 'finance,admin,it', data => 'Mary had a little lamb') . "\n" if $TU;
 $ticket = $at->ticket(ts => $ts, base64 => 0, uid => 'gavin', tokens => 'finance, admin, it', data => 'Mary had a little lamb');
 report $ticket, 'complex1';
 is($ticket, $result{complex1}, 'ticket complex 1 ok');
+ok($parsed = $at->parse_ticket($ticket), 'parse ticket complex 1');
+is($parsed->{uid}, 'gavin', 'uid parsed');
+is($parsed->{ts}, $ts, 'ts parsed');
+is($parsed->{tokens}, 'finance,admin,it', 'tokens parsed');
+is($parsed->{data}, 'Mary had a little lamb', 'data parsed');
 
 print TktUtil::get_auth_ticket(ts => $ts, base64 => 1, uid => 'freddy', ip_addr => $ENV{REMOTE_ADDR}, data => $ENV{REMOTE_ADDR}) . "\n" if $TU;
 $ticket = $at->ticket(ts => $ts, base64 => 1, uid => 'freddy', data => $ENV{REMOTE_ADDR});
 report $ticket, 'complex2';
 is($ticket, $result{complex2}, 'ticket complex 2 ok');
-
+ok($parsed = $at->parse_ticket($ticket), 'parse ticket complex 2');
+is($parsed->{uid}, 'freddy', 'uid parsed');
+is($parsed->{ts}, $ts, 'ts parsed');
+is($parsed->{tokens}, '', "tokens ''");
+is($parsed->{data}, $ENV{REMOTE_ADDR}, 'data parsed');
 
 
 # vim:ft=perl

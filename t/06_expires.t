@@ -38,5 +38,4 @@ for my $test (sort keys %tests) {
   is($at->cookie_expires, $tests{$test}, "$test cookie_expires ok");
 }
 
-# arch-tag: 8ab4b68e-894b-4e7a-bda2-30ba4ff37a38
 # vim:ft=perl

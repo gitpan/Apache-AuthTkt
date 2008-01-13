@@ -87,5 +87,4 @@ report $cookie, 'multiple';
 is($cookie, $result{multiple}, 'multiple ok');
 
 
-# arch-tag: ee701db8-7778-4686-9f3e-93481a0c2fa4
 # vim:ft=perl
