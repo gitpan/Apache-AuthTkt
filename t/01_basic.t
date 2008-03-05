@@ -49,7 +49,7 @@ my %arg = (
     debug => 1,
 );
 ok($at = Apache::AuthTkt->new(%arg), 'non-conf constructor with args ok');
-is($at->$_, $arg{$_}, "$_ accessor value ok") for keys %arg;
+is($at->$_(), $arg{$_}, "$_ accessor value ok") for keys %arg;
 
 
 # vim:ft=perl

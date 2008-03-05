@@ -39,12 +39,12 @@ for (keys %arg) {
 }
 
 ok($at = Apache::AuthTkt->new(%arg), 'non-conf constructor with args ok');
-is($at->$_, $arg{$_}, "$_ accessor value ok") for keys %arg;
+is($at->$_(), $arg{$_}, "$_ accessor value ok") for keys %arg;
 
 # Mutator tests
 for (keys %arg2) {
   $at->$_($arg2{$_});
-  is($at->$_, $arg2{$_}, "post-mutator $_ accessor value ok");
+  is($at->$_(), $arg2{$_}, "post-mutator $_ accessor value ok");
 }
 
 
