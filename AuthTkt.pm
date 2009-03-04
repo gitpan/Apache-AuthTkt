@@ -6,26 +6,26 @@ package Apache::AuthTkt;
 
 use 5.005;
 use Carp;
-use Digest::MD5 qw(md5_hex);
 use MIME::Base64;
 use strict;
 use vars qw($VERSION $AUTOLOAD);
 
-$VERSION = '0.08';
+$VERSION = 2.1;
 
 my $me = 'Apache::AuthTkt';
 my $PREFIX = 'TKTAuth';
 my %DEFAULTS = (
-    TKTAuthCookieName           => 'auth_tkt',
-    TKTAuthBackArgName          => 'back',
-    TKTAuthTimeout              => 2 * 60 * 60,
-    TKTAuthTimeoutMin           => 2 * 60,
-    TKTAuthTimeoutRefresh       => 0.5,
-    TKTAuthGuestLogin           => 0,
-    TKTAuthGuestUser            => 'guest',
-    TKTAuthIgnoreIP             => 0,
-    TKTAuthRequireSSL           => 0,
-    TKTAuthCookieSecure         => 0,
+    digest_type                 => 'MD5',
+    cookie_name                 => 'auth_tkt',
+    back_arg_name               => 'back',
+    timeout                     => 2 * 60 * 60,
+    timeout_min                 => 2 * 60,
+    timeout_refresh             => 0.5,
+    guest_login                 => 0,
+    guest_user                  => 'guest',
+    ignore_ip                   => 0,
+    require_ssl                 => 0,
+    cookie_secure               => 0,
 );
 my %BOOLEAN = map { $_ => 1 } qw(
     TKTAuthGuestLogin TKTAuthIgnoreIP TKTAuthRequireSSL TKTAuthCookieSecure
@@ -34,13 +34,20 @@ my %BOOLEAN = map { $_ => 1 } qw(
 ($DEFAULTS{TKTAuthDomain}) = split /:/, $ENV{HTTP_HOST} || '';
 $DEFAULTS{TKTAuthDomain} ||= $ENV{SERVER_NAME};
 my %ATTR = map { $_ => 1 } qw(
-    conf secret 
+    conf secret secret_old digest_type
     cookie_name back_cookie_name back_arg_name domain cookie_expires
     login_url timeout_url post_timeout_url unauth_url 
     timeout timeout_min timeout_refresh token debug
     guest_login guest_user ignore_ip require_ssl cookie_secure
 );
 #my %TICKET_ARGS = map { $_ => 1 } 
+
+# digest_type => [ module, function ]
+my %DIGEST_TYPE = (
+    MD5     => [ 'Digest::MD5', 'md5_hex' ],
+    SHA256  => [ 'Digest::SHA', 'sha256_hex' ],
+    SHA512  => [ 'Digest::SHA', 'sha512_hex' ],
+);
 
 # Helper routine to convert time units into seconds
 my %units = (
@@ -90,7 +97,7 @@ sub parse_conf
         unless $seen{TKTAuthSecret};
 
     # Set directives as $self attributes
-    my %merge = ( %DEFAULTS, %seen );
+    my %merge = ( %seen );
     for my $directive (keys %merge) {
         local $_ = $directive;
         s/^TKTAuth(\w)/\L$1/;
@@ -137,6 +144,8 @@ sub init
 
     croak "[$me] bad constructor - 'secret' or 'conf' argument required"
         unless $self->{conf} || $self->{secret};
+    croak "[$me] invalid digest_type '" . $self->{digest_type} . "'"
+        unless $DIGEST_TYPE{ $self->{digest_type } };
 
     $self;
 }
@@ -145,7 +154,7 @@ sub init
 sub new
 {
     my $class = shift;
-    my $self = {};
+    my $self = { %DEFAULTS };
     bless $self, $class;
     $self->init(@_);
 }
@@ -197,7 +206,7 @@ sub ticket
         $self->errstr("invalid ip_addr '$arg{ip_addr}'");
         return undef;
     }
-    if ($arg{tokens} =~ m/[!@#\$%^&*\];\s]/) {
+    if ($arg{tokens} =~ m/[!\s]/) {
         $self->errstr("invalid chars in tokens '$arg{tokens}'");
         return undef;
     }
@@ -215,6 +224,18 @@ sub ticket
     return $arg{base64} ? encode_base64($ticket, '') : $ticket;
 }
 
+sub _get_digest_function
+{
+    my $self = shift;
+
+    die "Invalid digest_type '" . $self->digest_type . "'\n"
+        unless $DIGEST_TYPE{ $self->digest_type };
+
+    my ($module, $func) = @{ $DIGEST_TYPE{ $self->digest_type } };
+    eval "require $module";
+    return eval "\\&${module}::$func";
+}
+
 sub _get_digest
 {
     my ($self, $ts, $ip_addr, $uid, $tokens, $data, $debug) = @_;
@@ -225,8 +246,9 @@ sub _get_digest
                (($ts & 0xff)) );
     my $ipts = pack("C8", @ip, @ts);
     my $raw = $ipts . $self->secret . $uid . "\0" . $tokens . "\0" . $data;
-    my $digest0 = md5_hex($raw);
-    my $digest = md5_hex($digest0 . $self->secret);
+    my $digest_function = $self->_get_digest_function;
+    my $digest0 = $digest_function->($raw);
+    my $digest  = $digest_function->($digest0 . $self->secret);
 
     if ($debug) {
         print STDERR "ts: $ts\nip_addr: $ip_addr\nuid: $uid\ntokens: $tokens\ndata: $data\n";
@@ -346,6 +368,7 @@ mod_auth_tkt apache module.
     # OR:
     $at = Apache::AuthTkt->new(
         secret => '818f9c9d-91ed-4b74-9f48-ff99cfe00a0e',
+        digest_type => 'MD5',
     );
 
     # Generate ticket
@@ -399,12 +422,13 @@ it needs, as well as any additional TKTAuth* directives it finds:
     );
 
 Alternatively, you can pass the mod_auth_tkt shared secret (the 
-TKTAuthSecret value) explicitly to the constructor: 
+TKTAuthSecret value) and the digest_type to use (default is 'MD5')
+explicitly to the constructor:
 
     $at = Apache::AuthTkt->new(
         secret => '818f9c9d-91ed-4b74-9f48-ff99cfe00a0e',
+        digest_type => 'SHA256',
     );
-
 
 =head2 ACCESSORS
 
@@ -415,6 +439,8 @@ accessors named after the relevant TKTAuth directive (with the 'TKTAuth'
 prefix dropped and converted to lowercase underscore format) i.e.
 
     $at->secret()
+    $at->secret_old()
+    $at->digest_type()
     $at->cookie_name()
     $at->back_cookie_name()
     $at->back_arg_name()
@@ -546,6 +572,28 @@ that the ticket has been validated elsewhere. In general it's considerably
 safer to just use validate_ticket.
 
 
+=head2 DIGEST TYPES
+
+As of version 2.1.0, mod_auth_tkt supports multiple digest types. The
+following digest_types are currently supported:
+
+=over 4
+
+=item MD5
+
+The current default, for backwards compatibility. Requires the Digest::MD5
+perl module.
+
+=item SHA256
+
+Requires the Digest::SHA perl module.
+
+=back
+
+These can be set either via your config (the TKTAuthDigestType directive)
+or by passing a 'digest_type' parameter to the AuthTkt constructor.
+
+
 =head1 AUTHOR
 
 Gavin Carr <gavin@openfusion.com.au>
@@ -560,7 +608,7 @@ Jose Luis Martinez <jlmartinez@capside.com>
 
 =head1 COPYRIGHT
 
-Copyright 2001-2008 Gavin Carr and contributors.
+Copyright 2001-2009 Gavin Carr and contributors.
 
 This program is free software. You may copy or redistribute it under the
 same terms as perl itself.

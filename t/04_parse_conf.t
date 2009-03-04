@@ -1,7 +1,7 @@
 # parse_conf testing
 
 use File::Basename;
-use Test::More tests => 35;
+use Test::More tests => 36;
 BEGIN { use_ok( Apache::AuthTkt ) }
 use strict;
 
@@ -14,6 +14,7 @@ ok($at = Apache::AuthTkt->new(conf => "$dir/t04/auth_tkt.conf"),
     'conf constructor ok');
 %attr = (
     secret => '0e1d79e1-c18b-43c5-bfd6-a396e13bf39c',
+    secret_old => "8be1b398-d84f-497c-9c73-9660ecee2b97",
     cookie_name => 'auth_tkt',
     back_cookie_name => undef,
     back_arg_name => 'back',

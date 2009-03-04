@@ -1,7 +1,7 @@
 # Basic constructor
 
 use File::Basename;
-use Test::More tests => 25;
+use Test::More tests => 27;
 BEGIN { use_ok( Apache::AuthTkt ) }
 use strict;
 
@@ -28,10 +28,12 @@ ok(! defined eval { Apache::AuthTkt->new(conf => '/etc/passwd') },
 ok($at = Apache::AuthTkt->new(conf => "$dir/t01/mod_auth_tkt.conf"),
     'conf constructor ok');
 is($at->secret, '0e1d79e1-c18b-43c5-bfd6-a396e13bf39c', 'secret() ok');
+is($at->digest_type, 'MD5', 'digest_type() ok');
 
 # Constructor with args
 my %arg = (
     secret => $secret,
+    digest_type => 'MD5',
     cookie_name => 'auth_cookie',
     back_arg_name => 'bacchus',
     domain => '.openfusion.com.au',
